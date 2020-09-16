@@ -538,6 +538,7 @@ TEXT runtime·futex(SB),NOSPLIT,$0
 
 // int32 clone(int32 flags, void *stk, M *mp, G *gp, void (*fn)(void));
 TEXT runtime·clone(SB),NOSPLIT,$0
+    // Linux系统调用约定，这四个参数需要分别放入rdi， rsi，rdx和r10寄存器中
 	MOVL	flags+0(FP), DI
 	MOVQ	stk+8(FP), SI
 	MOVQ	$0, DX
@@ -545,21 +546,22 @@ TEXT runtime·clone(SB),NOSPLIT,$0
 
 	// Copy mp, gp, fn off parent stack for use by child.
 	// Careful: Linux system call clobbers CX and R11.
+	// Linux系统调用会污染CX和R11; 所以我们参数不放在那里面
 	MOVQ	mp+16(FP), R8
 	MOVQ	gp+24(FP), R9
 	MOVQ	fn+32(FP), R12
 
-	MOVL	$SYS_clone, AX
+	MOVL	$SYS_clone, AX // 系统调用了; 返回值放入AX寄存器里面.
 	SYSCALL
 
 	// In parent, return.
-	CMPQ	AX, $0
+	CMPQ	AX, $0    // 如果返回值是0,证明是子进程返回
 	JEQ	3(PC)
-	MOVL	AX, ret+40(FP)
+	MOVL	AX, ret+40(FP) // 父进程返回,返回到父进程的AX不等于0
 	RET
 
 	// In child, on new stack.
-	MOVQ	SI, SP
+	MOVQ	SI, SP   // sp = stk+8(FP); 就是设置子线程的栈顶;
 
 	// If g or m are nil, skip Go-related setup.
 	CMPQ	R8, $0    // m
@@ -570,16 +572,16 @@ TEXT runtime·clone(SB),NOSPLIT,$0
 	// Initialize m->procid to Linux tid
 	MOVL	$SYS_gettid, AX
 	SYSCALL
-	MOVQ	AX, m_procid(R8)
+	MOVQ	AX, m_procid(R8) // 设置m.proc_id = sys_gettid()
 
 	// Set FS to point at m->tls.
-	LEAQ	m_tls(R8), DI
-	CALL	runtime·settls(SB)
+	LEAQ	m_tls(R8), DI  // 不取引用,所以是DI=&m.tls[0];把m.tls[0]地址给DI寄存器.
+	CALL	runtime·settls(SB) // FS寄存器里的值:就是m.tls[0]的地址.
 
 	// In child, set up new stack
-	get_tls(CX)
+	get_tls(CX) // CX = &m.tls[0]
 	MOVQ	R8, g_m(R9)
-	MOVQ	R9, g(CX)
+	MOVQ	R9, g(CX) // gp+24(FP) == R9; g(CX)---> *CX; m.tls[0]=g0;
 	CALL	runtime·stackcheck(SB)
 
 nog:

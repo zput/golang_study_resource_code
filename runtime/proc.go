@@ -1859,7 +1859,7 @@ func newm(fn func(), _p_ *p) {
 }
 
 func newm1(mp *m) {
-	if iscgo {
+	if iscgo {  // 暂时忽略
 		var ts cgothreadstart
 		if _cgo_thread_start == nil {
 			throw("_cgo_thread_start missing")

@@ -140,6 +140,7 @@ func newosproc(mp *m) {
 
 	// Disable signals during clone, so that the new thread starts
 	// with signals disabled. It will enable them in minit.
+	// 在clone,关闭信号,所以创建出来的thread信号都是关闭的,minit函数再打开.
 	var oset sigset
 	sigprocmask(_SIG_SETMASK, &sigset_all, &oset)
 	ret := clone(cloneFlags, stk, unsafe.Pointer(mp), unsafe.Pointer(mp.g0), unsafe.Pointer(funcPC(mstart)))
