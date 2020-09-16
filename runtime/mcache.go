@@ -14,7 +14,11 @@ import (
 //
 // mcaches are allocated from non-GC'd memory, so any heap pointers
 // must be specially handled.
-//
+
+// 每线程（在Go中，per-P）的小对象缓存。
+// 因为是每线程（per-P），所以不需要锁定。
+// mcaches是由非GC内存分配的，所以任何堆指针必须特别处理。
+
 //go:notinheap
 type mcache struct {
 	// The following members are accessed on every malloc,

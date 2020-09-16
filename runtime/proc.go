@@ -1457,34 +1457,60 @@ type cgothreadstart struct {
 // isn't because it borrows _p_.
 //
 //go:yeswritebarrierrec
+/*
+- 因为函数需要new小对象,需要用到P.mcache,需要判断当前的M是否关联着P,如果没有就要向参数借,但是为什么没有判断如果参数_P_是nil的情况?
+- 释放不需要等待的全局的M's stack资源,这里是防止新生成线程又需要stack空间,所以先释放一些?
+- new M, g0结构体,并且给g0分配stack空间.
+
+- 遗留
+  - 为什么需要locks--?
+*/
 func allocm(_p_ *p, fn func()) *m {
 	_g_ := getg()
-	acquirem() // disable GC because it can be called from sysmon
-	if _g_.m.p == 0 {
+	acquirem() // disable GC because it can be called from sysmon 
+	 /*
+	func acquirem() *m {
+	 	_g_ := getg()
+	 	_g_.m.locks++
+	 	return _g_.m
+	 } 
+	 
+	 TODO zxc: 这里很奇怪的,只是把M结构体里面的locks字段++1; 后面的releasem又把这个locks--?
+	 
+	 func releasem(mp *m) {
+	 	_g_ := getg()
+	 	mp.locks--
+	 	if mp.locks == 0 && _g_.preempt {
+	 		// restore the preemption request in case we've cleared it in newstack
+	 		_g_.stackguard0 = stackPreempt
+	 	}
+	 }
+	 */
+	if _g_.m.p == 0 { //如果当前m的P不存在,acquirep(_p_)关联_p_和当前的M;只是用于小对象的分配到堆上? TODO zxc: 这里P.mcahce,就是M.mcache
 		acquirep(_p_) // temporarily borrow p for mallocs in this function
 	}
-
+	
 	// Release the free M list. We need to do this somewhere and
 	// this may free up a stack we can use.
 	if sched.freem != nil {
 		lock(&sched.lock)
 		var newList *m
 		for freem := sched.freem; freem != nil; {
-			if freem.freeWait != 0 {
+			if freem.freeWait != 0 { // if == 0, 安全释放g0并删除m; 这里如果不等于0,就说明需要等待,还不能立即释放,所以这个if里面就好像链表反转算法,转移到新链表.
 				next := freem.freelink
-				freem.freelink = newList
-				newList = freem
-				freem = next
-				continue
-			}
-			stackfree(freem.g0.stack)
-			freem = freem.freelink
+				freem.freelink = newList //freem.freelink = newList(nil); so, freem.freelink == nil 
+				newList = freem // newList.freelink == nil; freem == newList 
+				freem = next    // 
+				continue 
+			} 
+			stackfree(freem.g0.stack) // 说明freem.freeWait==0;可以立即g0 stack释放
+			freem = freem.freelink  // freem等于它的next指针
 		}
-		sched.freem = newList
+		sched.freem = newList //这里就把不能释放的重新放入全局释放列表
 		unlock(&sched.lock)
 	}
 
-	mp := new(m)
+	mp := new(m) // new一个M结构体
 	mp.mstartfn = fn
 	mcommoninit(mp)
 
@@ -1493,14 +1519,14 @@ func allocm(_p_ *p, fn func()) *m {
 	if iscgo || GOOS == "solaris" || GOOS == "illumos" || GOOS == "windows" || GOOS == "plan9" || GOOS == "darwin" {
 		mp.g0 = malg(-1)
 	} else {
-		mp.g0 = malg(8192 * sys.StackGuardMultiplier)
+		mp.g0 = malg(8192 * sys.StackGuardMultiplier) //约等于1024*8=8192 ==> 8k
 	}
 	mp.g0.m = mp
 
-	if _p_ == _g_.m.p.ptr() {
+	if _p_ == _g_.m.p.ptr() { //如果是借P来进行malloc,那么需要恢复原样.
 		releasep()
 	}
-	releasem(_g_.m)
+	releasem(_g_.m) // TODO zxc: locks ?
 
 	return mp
 }
@@ -4160,7 +4186,7 @@ func releasep() *p {
 		traceProcStop(_g_.m.p.ptr())
 	}
 	_g_.m.p = 0
-	_g_.m.mcache = nil
+	_g_.m.mcache = nil //这里mcache直接置为nil,但是_p_.mcache没有动作,它的确是分配在堆上的,不然,从其他P偷G的时候,其他的P不就不能通过指针获得数据.实际上它是可以的; mcache应该是只是不进入系统gc,它需要每个P自己管理.
 	_p_.m = 0
 	_p_.status = _Pidle
 	return _p_
