@@ -914,7 +914,7 @@ func round2(x int32) int32 {
 //
 //go:nowritebarrierrec
 func newstack() {
-	thisg := getg()
+	thisg := getg() //到这里我们又是在g0栈里面。
 	// TODO: double check all gp. shouldn't be getg().
 	if thisg.m.morebuf.g.ptr().stackguard0 == stackFork {
 		throw("stack growth after fork")
@@ -926,7 +926,7 @@ func newstack() {
 		throw("runtime: wrong goroutine in newstack")
 	}
 
-	gp := thisg.m.curg
+	gp := thisg.m.curg //这个就是原来的Goroutine.
 
 	if thisg.m.curg.throwsplit {
 		// Update syscallsp, syscallpc in case traceback uses them.
@@ -958,7 +958,7 @@ func newstack() {
 	// NOTE: stackguard0 may change underfoot, if another thread
 	// is about to try to preempt gp. Read it just once and use that same
 	// value now and below.
-	preempt := atomic.Loaduintptr(&gp.stackguard0) == stackPreempt
+	preempt := atomic.Loaduintptr(&gp.stackguard0) == stackPreempt //这里判断是否是抢占 打了stackguard0;
 
 	// Be conservative about where we preempt.
 	// We are interested in preempting user Go code, not runtime code.
@@ -973,10 +973,11 @@ func newstack() {
 	// it needs a lock held by the goroutine), that small preemption turns
 	// into a real deadlock.
 	if preempt {
+		// 这里还检查了一系列的状态，如果满足就不抢占它了， 让它继续执行。
 		if thisg.m.locks != 0 || thisg.m.mallocing != 0 || thisg.m.preemptoff != "" || thisg.m.p.ptr().status != _Prunning {
 			// Let the goroutine keep running for now.
 			// gp->preempt is set, so it will be preempted next time.
-			gp.stackguard0 = gp.stack.lo + _StackGuard
+			gp.stackguard0 = gp.stack.lo + _StackGuard //还原stackguard0为正常值，表示我们已经处理过抢占请求了
 			gogo(&gp.sched) // never return
 		}
 	}
@@ -1008,8 +1009,8 @@ func newstack() {
 			throw("runtime: g is running but p is not")
 		}
 		// Synchronize with scang.
-		casgstatus(gp, _Grunning, _Gwaiting)
-		if gp.preemptscan {
+		casgstatus(gp, _Grunning, _Gwaiting) // 设置gp状态变为等待状态。处理gc时把gp的状态修改成_Gwaiting
+		if gp.preemptscan { //gc相关，暂时忽略。
 			for !castogscanstatus(gp, _Gwaiting, _Gscanwaiting) {
 				// Likely to be racing with the GC as
 				// it sees a _Gwaiting and does the
@@ -1034,8 +1035,8 @@ func newstack() {
 		}
 
 		// Act like goroutine called runtime.Gosched.
-		casgstatus(gp, _Gwaiting, _Grunning)
-		gopreempt_m(gp) // never return
+		casgstatus(gp, _Gwaiting, _Grunning) //恢复状态。
+		gopreempt_m(gp) // never return === gopreempt_m(gp)---call--->goschedImpl(gp)----call-->globrunqput()放入全局队列/schedule()
 	}
 
 	// Allocate a bigger segment and move the stack.

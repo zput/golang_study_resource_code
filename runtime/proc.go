@@ -1949,7 +1949,7 @@ func stopm() {
 	}
 
 	lock(&sched.lock)
-	mput(_g_.m)
+	mput(_g_.m) //把M放入全局空闲M队列
 	unlock(&sched.lock)
 	notesleep(&_g_.m.park)
 	noteclear(&_g_.m.park)
@@ -2814,25 +2814,32 @@ func save(pc, sp uintptr) {
 // because tracing can be enabled in the middle of syscall. We don't want the wait to hang.
 //
 //go:nosplit
+
+/*
+
+- 把PC,SP保存到当前Goroutine.sched里面;
+- 解除M与P两者之间的关系;
+- 设置P的状态为_Psyscall
+*/
 func reentersyscall(pc, sp uintptr) {
-	_g_ := getg()
+	_g_ := getg() // get Goroutine的g
 
 	// Disable preemption because during this function g is in Gsyscall status,
 	// but can have inconsistent g->sched, do not let GC observe it.
-	_g_.m.locks++
+	_g_.m.locks++ // ++就能让GC不能观察到？TODO zxc:
 
 	// Entersyscall must not call any function that might split/grow the stack.
 	// (See details in comment above.)
 	// Catch calls that might, by replacing the stack guard with something that
 	// will trip any stack check and leaving a flag to tell newstack to die.
-	_g_.stackguard0 = stackPreempt
+	_g_.stackguard0 = stackPreempt //进入系统调用前就设置了抢占标志。
 	_g_.throwsplit = true
 
 	// Leave SP around for GC and traceback.
-	save(pc, sp)
-	_g_.syscallsp = sp
-	_g_.syscallpc = pc
-	casgstatus(_g_, _Grunning, _Gsyscall)
+	save(pc, sp) //保存寄存器的值到当前Goroutine的sched结构体。
+	_g_.syscallsp = sp //gc使用
+	_g_.syscallpc = pc //gc使用
+	casgstatus(_g_, _Grunning, _Gsyscall) // 修改状态
 	if _g_.syscallsp < _g_.stack.lo || _g_.stack.hi < _g_.syscallsp {
 		systemstack(func() {
 			print("entersyscall inconsistent ", hex(_g_.syscallsp), " [", hex(_g_.stack.lo), ",", hex(_g_.stack.hi), "]\n")
@@ -2859,20 +2866,20 @@ func reentersyscall(pc, sp uintptr) {
 		save(pc, sp)
 	}
 
-	_g_.m.syscalltick = _g_.m.p.ptr().syscalltick
+	_g_.m.syscalltick = _g_.m.p.ptr().syscalltick //把P的syscalltick,放到m中。
 	_g_.sysblocktraced = true
 	_g_.m.mcache = nil
 	pp := _g_.m.p.ptr()
-	pp.m = 0
-	_g_.m.oldp.set(pp)
-	_g_.m.p = 0
-	atomic.Store(&pp.status, _Psyscall)
+	pp.m = 0 // 解除P与M的关系。
+	_g_.m.oldp.set(pp) // 把现在的P放到M中的oldp中。
+	_g_.m.p = 0 // 解除M与P的关系。
+	atomic.Store(&pp.status, _Psyscall) // 修改P的状态为系统调用。
 	if sched.gcwaiting != 0 {
 		systemstack(entersyscall_gcwait)
 		save(pc, sp)
 	}
 
-	_g_.m.locks--
+	_g_.m.locks-- // --解除锁定。
 }
 
 // Standard syscall entry used by the go syscall library and normal cgo calls.
@@ -2882,7 +2889,7 @@ func reentersyscall(pc, sp uintptr) {
 //go:nosplit
 //go:linkname entersyscall
 func entersyscall() {
-	reentersyscall(getcallerpc(), getcallersp())
+	reentersyscall(getcallerpc(), getcallersp()) // 这个是Goroutine的pc, sp,不是g0的，因为还没有切换栈。
 }
 
 func entersyscall_sysmon() {
@@ -2975,18 +2982,27 @@ func entersyscallblock_handoff() {
 //go:nosplit
 //go:nowritebarrierrec
 //go:linkname exitsyscall
+
+/*
+这个退出系统调用：
+  - 尝试重新绑定oldp,如果没有成功，从全局空闲P队列获得一个P。
+  - 如果还是失败，mcall-->exitsyscall0()，
+    - 在这个里面再次从全局空闲P队列中尝试下，如果失败就把Goroutine放入全局空闲G队列;
+    - M放入全局空闲M队列,休眠M;
+    - schedule().
+*/
 func exitsyscall() {
 	_g_ := getg()
 
-	_g_.m.locks++ // see comment in entersyscall
+	_g_.m.locks++ // see comment in entersyscall 防止GC？ TODO zxc:
 	if getcallersp() > _g_.syscallsp {
 		throw("exitsyscall: syscall frame is no longer valid")
 	}
 
 	_g_.waitsince = 0
-	oldp := _g_.m.oldp.ptr()
+	oldp := _g_.m.oldp.ptr() //重新取出oldp
 	_g_.m.oldp = 0
-	if exitsyscallfast(oldp) {
+	if exitsyscallfast(oldp) { //如果返回true，那么M与P在这个里面已经重新关联了。
 		if _g_.m.mcache == nil {
 			throw("lost mcache")
 		}
@@ -2996,7 +3012,7 @@ func exitsyscall() {
 			}
 		}
 		// There's a cpu for us, so we can run.
-		_g_.m.p.ptr().syscalltick++
+		_g_.m.p.ptr().syscalltick++ //系统调用完成，syscalltick自增。
 		// We need to cas the status and scan before resuming...
 		casgstatus(_g_, _Gsyscall, _Grunning)
 
@@ -3009,7 +3025,7 @@ func exitsyscall() {
 			_g_.stackguard0 = stackPreempt
 		} else {
 			// otherwise restore the real _StackGuard, we've spoiled it in entersyscall/entersyscallblock
-			_g_.stackguard0 = _g_.stack.lo + _StackGuard
+			_g_.stackguard0 = _g_.stack.lo + _StackGuard //在entersyscall里面我们设置_g_.stackguard0 = stackPreempt //进入系统调用前就设置了抢占标志。这里要恢复。
 		}
 		_g_.throwsplit = false
 
@@ -3066,8 +3082,13 @@ func exitsyscallfast(oldp *p) bool {
 
 	// Try to re-acquire the last P.
 	if oldp != nil && oldp.status == _Psyscall && atomic.Cas(&oldp.status, _Psyscall, _Pidle) {
+		/*
+			- 查看老的P的状态是否是正处于_Psyscall;
+		      - 从reentersyscall里面的三个步骤，当它设置为_Psyscall, 它这个时候是没有与任何M相关联。
+		      - 所以这里如果发现P又处于_psyscall，直接关联。
+		*/
 		// There's a cpu for us, so we can run.
-		wirep(oldp)
+		wirep(oldp) // 关联M和P；当前的M和这个oldp。
 		exitsyscallfast_reacquired()
 		return true
 	}
@@ -3102,7 +3123,7 @@ func exitsyscallfast(oldp *p) bool {
 //go:nosplit
 func exitsyscallfast_reacquired() {
 	_g_ := getg()
-	if _g_.m.syscalltick != _g_.m.p.ptr().syscalltick {
+	if _g_.m.syscalltick != _g_.m.p.ptr().syscalltick { // 如果他们两者不相等，那么说明该p被收回，然后再次进入syscall(因为_g_.m.syscalltick变了)
 		if trace.enabled {
 			// The p was retaken and then enter into syscall again (since _g_.m.syscalltick has changed).
 			// traceGoSysBlock for this syscall was already emitted,
@@ -3114,11 +3135,11 @@ func exitsyscallfast_reacquired() {
 				traceGoSysExit(0)
 			})
 		}
-		_g_.m.p.ptr().syscalltick++
+		_g_.m.p.ptr().syscalltick++ // 这里又开始自增了--->因为它在进入reentersyscall()函数是不能增加这个值的。只有当退出exitsyscall()函数才会自增，所以如果
 	}
 }
 
-func exitsyscallfast_pidle() bool {
+func exitsyscallfast_pidle() bool { // 从全局空闲P队列获取。
 	lock(&sched.lock)
 	_p_ := pidleget()
 	if _p_ != nil && atomic.Load(&sched.sysmonwait) != 0 {
@@ -3140,30 +3161,30 @@ func exitsyscallfast_pidle() bool {
 func exitsyscall0(gp *g) {
 	_g_ := getg()
 
-	casgstatus(gp, _Gsyscall, _Grunnable)
-	dropg()
-	lock(&sched.lock)
+	casgstatus(gp, _Gsyscall, _Grunnable) //从系统调用状态转变为可运行状态
+	dropg() //断开M与G之间的关系
+	lock(&sched.lock) //要修改全局的sched,先加锁
 	var _p_ *p
 	if schedEnabled(_g_) {
-		_p_ = pidleget()
+		_p_ = pidleget() //从全局空闲P队列获取一个P
 	}
 	if _p_ == nil {
-		globrunqput(gp)
+		globrunqput(gp) //如果没有获取P，那么把Goroutine放入全局空闲g队列。
 	} else if atomic.Load(&sched.sysmonwait) != 0 {
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
 	}
 	unlock(&sched.lock)
-	if _p_ != nil {
-		acquirep(_p_)
-		execute(gp, false) // Never returns.
+	if _p_ != nil { //如果有获取到P。
+		acquirep(_p_) // 关联P与M
+		execute(gp, false) // Never returns. 直接执行
 	}
-	if _g_.m.lockedg != 0 {
+	if _g_.m.lockedg != 0 { // TODO zxc: 我记得是这个某个g,必须运行在某个线程上面，比如，main.main.
 		// Wait until another thread schedules gp and so m again.
 		stoplockedm()
 		execute(gp, false) // Never returns.
 	}
-	stopm()
+	stopm() //停止M。
 	schedule() // Never returns.
 }
 
