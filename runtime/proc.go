@@ -2194,7 +2194,7 @@ func execute(gp *g, inheritTime bool) {
 // Finds a runnable goroutine to execute.
 // Tries to steal from other P's, get g from global queue, poll network.
 func findrunnable() (gp *g, inheritTime bool) {
-	_g_ := getg()
+	_g_ := getg() //
 
 	// The conditions here and in handoffp must agree: if
 	// findrunnable would return a G to run, handoffp must start
@@ -2219,14 +2219,16 @@ top:
 	}
 
 	// local runq
+	// 再次看一下本地运行队列是否有需要运行的goroutine
 	if gp, inheritTime := runqget(_p_); gp != nil {
 		return gp, inheritTime
 	}
 
 	// global runq
+	// 再看看全局运行队列是否有需要运行的goroutine
 	if sched.runqsize != 0 {
 		lock(&sched.lock)
-		gp := globrunqget(_p_, 0)
+		gp := globrunqget(_p_, 0)          // ---------------------here; globrunqget
 		unlock(&sched.lock)
 		if gp != nil {
 			return gp, false
@@ -2253,16 +2255,18 @@ top:
 	}
 
 	// Steal work from other P's.
+	// 使用所有P与空闲的P进行比较，如果除了自己，其他的P都是休眠状态。那么整个系统都没有工作需要做了。
 	procs := uint32(gomaxprocs)
 	if atomic.Load(&sched.npidle) == procs-1 {
 		// Either GOMAXPROCS=1 or everybody, except for us, is idle already.
 		// New work can appear from returning syscall/cgocall, network or timers.
 		// Neither of that submits to local run queues, so no point in stealing.
-		goto stop
+		goto stop   //直接跳到睡眠
 	}
 	// If number of spinning M's >= number of busy P's, block.
 	// This is necessary to prevent excessive CPU consumption
 	// when GOMAXPROCS>>1 but the program parallelism is low.
+	// 当这个M不是自旋状态，并且此时的二倍的自旋M大于当前正在工作的P; 说明此时有许多现在在寻找工作做.
 	if !_g_.m.spinning && 2*atomic.Load(&sched.nmspinning) >= procs-atomic.Load(&sched.npidle) {
 		goto stop
 	}
@@ -4802,12 +4806,18 @@ const randomizeScheduler = raceenabled
 // If next is true, runqput puts g in the _p_.runnext slot.
 // If the run queue is full, runnext puts g on the global queue.
 // Executed only by the owner P.
+/*
+- runqput尝试将g放在本地可运行队列中。
+  1. >如果 next 为 false，runqput 将 g 加到可运行队列的尾部。
+  2. 如果 next 为真，runqput 将 g 放在 _p_.runnext 槽中。
+  3. 如果运行队列满了，runnext就把g放到全局队列中。
+*/
 func runqput(_p_ *p, gp *g, next bool) {
 	if randomizeScheduler && next && fastrand()%2 == 0 {
 		next = false
 	}
 
-	if next {
+	if next { //第二步所说的
 	retryNext:
 		oldnext := _p_.runnext
 		if !_p_.runnext.cas(oldnext, guintptr(unsafe.Pointer(gp))) {
